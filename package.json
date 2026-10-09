@@ -1,0 +1,21 @@
+{
+  "name": "grader",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "body-parser": "^1.20.2",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.17.3",
+    "helmet": "^7.1.0",
+    "multer": "^2.0.0",
+    "sanitize-filename": "^1.6.3",
+    "uuid": "^9.0.1"
+  }
+}

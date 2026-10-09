@@ -1,0 +1,22 @@
+# --- never commit: live data (password hashes, every submission's code, session secret, login sessions)
+/data/
+
+# --- uploaded problem statements (PDFs) — often not ours to redistribute
+/uploads/
+
+# --- dependencies / build output
+/node_modules/
+# built from sandbox_runner.cs (graders/build_runner.ps1; the server also builds it on start)
+/graders/sandbox_runner.exe
+
+# --- runtime scratch + logs
+/.sandbox/
+*.log
+*.tmp
+
+# --- local machine / editor
+.env
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

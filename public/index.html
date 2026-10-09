@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Grader</title>
+  <script>
+    // apply saved theme before paint
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('grader:theme'); } catch (e) {}
+      if (!t) t = (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', t);
+      window.cmReady = new Promise(function (r) { window.__cmResolve = r; });
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --bg:#f6f6f3; --surface:#ffffff; --surface-2:#efefeb; --border:#d8d8d2; --text:#1f2328; --muted:#6a6e75;
+      --accent:#2457c5; --accent-hover:#1c47a3; --accent-soft:#e7eefb;
+      --ok:#1a7f37; --ok-soft:#e4f3e8; --warn:#8a5a00; --warn-soft:#fbf0cc; --bad:#c62828; --bad-soft:#fbe7e7;
+      --gray:#6a6e75; --gray-soft:#ecece8;
+    }
+    [data-theme="dark"] {
+      --bg:#15171b; --surface:#1d2025; --surface-2:#262a30; --border:#363b43; --text:#e6e8eb; --muted:#9097a1;
+      --accent:#6b9bff; --accent-hover:#8bb0ff; --accent-soft:#1e2a44;
+      --ok:#4cc272; --ok-soft:#17301f; --warn:#e3b341; --warn-soft:#33290f; --bad:#f07178; --bad-soft:#3a1c1f;
+      --gray:#9097a1; --gray-soft:#262a30;
+    }
+    html { color-scheme: light; } html[data-theme="dark"] { color-scheme: dark; }
+    html body { font-family:'Sarabun', 'Noto Sans Thai', system-ui, 'Segoe UI', sans-serif; font-size:16px; background:var(--bg); color:var(--text); }
+    .hidden { display:none !important; }
+    .muted { color:var(--muted); }
+    code, pre, .mono { font-family: Consolas, 'Cascadia Mono', ui-monospace, monospace; }
+    h1.title { font-size:1.4rem; font-weight:700; }
+
+    /* surfaces */
+    .box { background:var(--surface); border:1px solid var(--border); border-radius:6px; }
+
+    /* nav */
+    .topnav { background:var(--surface); border-bottom:1px solid var(--border); }
+    .brand { font-weight:700; font-size:1.15rem; }
+    .tab { padding:.3rem .7rem; border-radius:4px; color:var(--muted); }
+    .tab:hover { color:var(--text); background:var(--surface-2); }
+    .tab.active { color:var(--text); background:var(--surface-2); font-weight:600; }
+    .iconbtn { width:34px; height:34px; display:grid; place-items:center; border-radius:6px; color:var(--muted); border:1px solid var(--border); background:var(--surface); }
+    .iconbtn:hover { color:var(--text); background:var(--surface-2); }
+
+    /* buttons & inputs */
+    .btn { display:inline-flex; align-items:center; justify-content:center; gap:.4rem; padding:.4rem .9rem; border-radius:6px; font-weight:500; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; line-height:1.4; }
+    .btn:hover { background:var(--surface-2); }
+    .btn:disabled { opacity:.55; cursor:not-allowed; }
+    .btn-primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+    .btn-primary:hover { background:var(--accent-hover); border-color:var(--accent-hover); }
+    [data-theme="dark"] .btn-primary { color:#0c1530; }
+    .btn-danger { color:var(--bad); } .btn-danger:hover { background:var(--bad-soft); }
+    .btn-sm { padding:.15rem .6rem; font-size:.9rem; }
+    .input, .select, .textarea { width:100%; padding:.4rem .6rem; border-radius:6px; border:1px solid var(--border); background:var(--surface); color:var(--text); }
+    .input:focus, .select:focus, .textarea:focus, .btn:focus-visible, .tab:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+    .select { appearance:none; padding-right:1.8rem; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239097a1' stroke-width='3'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right .6rem center; }
+    .field label { display:block; font-size:.9rem; margin-bottom:.2rem; }
+    .link { color:var(--accent); text-decoration:underline; text-underline-offset:2px; }
+    .kbd { font-family:Consolas,monospace; font-size:.75rem; padding:0 .3rem; border-radius:3px; border:1px solid var(--border); background:var(--surface-2); }
+
+    /* status labels */
+    .chip { display:inline-block; padding:0 .45rem; border-radius:3px; font-size:.82rem; font-weight:600; background:var(--gray-soft); color:var(--gray); white-space:nowrap; line-height:1.55; }
+    .chip.green { background:var(--ok-soft); color:var(--ok); }
+    .chip.yellow { background:var(--warn-soft); color:var(--warn); }
+    .chip.red { background:var(--bad-soft); color:var(--bad); }
+    .chip.gray { background:var(--gray-soft); color:var(--gray); }
+    .chip.accent { background:var(--accent-soft); color:var(--accent); }
+
+    /* tables */
+    .tbl { width:100%; border-collapse:collapse; }
+    .tbl th { text-align:left; font-weight:600; font-size:.88rem; color:var(--muted); padding:.5rem .75rem; border-bottom:1px solid var(--border); white-space:nowrap; }
+    .tbl td { padding:.6rem .75rem; border-bottom:1px solid var(--border); vertical-align:middle; }
+    .tbl tr:last-child td { border-bottom:0; }
+    .tbl tbody tr:hover { background:var(--surface-2); }
+    .tbl .num { width:3rem; color:var(--muted); font-variant-numeric:tabular-nums; }
+
+    /* test-case squares */
+    .cases { display:flex; flex-wrap:wrap; gap:3px; }
+    .case { min-width:22px; height:22px; padding:0 3px; border-radius:3px; display:inline-grid; place-items:center; font-size:.72rem; font-weight:600; background:var(--bad-soft); color:var(--bad); }
+    .case.pass { background:var(--ok-soft); color:var(--ok); }
+    .case.sm { min-width:12px; width:12px; height:12px; padding:0; font-size:0; background:var(--bad); }
+    .case.sm.pass { background:var(--ok); }
+
+    /* result */
+    .result { border:1px solid var(--border); border-left-width:4px; border-radius:6px; padding:.75rem 1rem; background:var(--surface); }
+    .result.green { border-left-color:var(--ok); } .result.yellow { border-left-color:#d4a017; }
+    .result.red { border-left-color:var(--bad); } .result.gray { border-left-color:var(--gray); }
+    .verdict { font-weight:700; }
+    .result.green .verdict { color:var(--ok); } .result.yellow .verdict { color:var(--warn); } .result.red .verdict { color:var(--bad); }
+    pre.log { margin-top:.4rem; max-height:180px; overflow:auto; padding:.6rem .75rem; border-radius:4px; font-size:.82rem; line-height:1.5; white-space:pre-wrap; background:var(--surface-2); color:var(--text); }
+
+    /* editor & pdf */
+    .editor-wrap { height:min(54vh, 560px); min-height:340px; border:1px solid var(--border); border-radius:4px; overflow:hidden; background:var(--surface); }
+    .editor-wrap .cm-editor { height:100%; font-size:14px; }
+    .editor-wrap .cm-scroller { font-family:Consolas,'Cascadia Mono',ui-monospace,monospace; }
+    .editor-wrap .cm-editor.cm-focused { outline:none; }
+    .editor-wrap textarea.fallback { width:100%; height:100%; padding:.7rem; resize:none; border:0; outline:none; background:var(--surface); color:var(--text); font:14px/1.55 Consolas,monospace; }
+    .pdf-box { height:78vh; min-height:420px; }
+    .pdf-box iframe { width:100%; height:100%; border:1px solid var(--border); border-radius:4px; background:#fff; }
+
+    /* tabs (admin) & filter */
+    .utabs { display:flex; gap:1.25rem; border-bottom:1px solid var(--border); }
+    .utabs button { padding:.4rem 0; margin-bottom:-1px; color:var(--muted); border-bottom:2px solid transparent; }
+    .utabs button:hover { color:var(--text); }
+    .utabs button.on { color:var(--text); font-weight:600; border-bottom-color:var(--accent); }
+
+    .err { color:var(--bad); font-size:.9rem; min-height:1.3rem; }
+    #toasts { position:fixed; right:16px; bottom:16px; z-index:100; display:flex; flex-direction:column; gap:6px; max-width:calc(100vw - 32px); }
+    .toast { padding:.5rem .9rem; border-radius:4px; background:var(--text); color:var(--bg); font-size:.92rem; }
+    .toast.ok { background:var(--ok); color:#fff; } .toast.bad { background:var(--bad); color:#fff; }
+    .empty { text-align:center; padding:2rem 1rem; color:var(--muted); }
+    .spin { width:12px; height:12px; border-radius:50%; border:2px solid rgba(255,255,255,.45); border-top-color:#fff; animation:rot .7s linear infinite; display:inline-block; }
+    @keyframes rot { to { transform:rotate(360deg); } }
+    details > summary { cursor:pointer; }
+    .row { display:flex; align-items:center; justify-content:space-between; gap:.75rem; padding:.5rem 0; border-bottom:1px solid var(--border); }
+    .row:last-child { border-bottom:0; }
+    .scroll-x { overflow-x:auto; }
+    @media (max-width:640px){ .hide-sm { display:none !important; } }
+  </style>
+
+  <!-- CodeMirror 6 (dynamic import; falls back to a plain textarea if the CDN is unreachable) -->
+  <script type="module">
+    (async () => {
+      try {
+        const [{ EditorState, Compartment }, { EditorView, keymap }, { defaultKeymap, indentWithTab }, { basicSetup }, { cpp }, { python }] = await Promise.all([
+          import("https://esm.sh/@codemirror/state"),
+          import("https://esm.sh/@codemirror/view"),
+          import("https://esm.sh/@codemirror/commands"),
+          import("https://esm.sh/codemirror"),
+          import("https://esm.sh/@codemirror/lang-cpp"),
+          import("https://esm.sh/@codemirror/lang-python")
+        ]);
+        let oneDark = null;
+        try { ({ oneDark } = await import("https://esm.sh/@codemirror/theme-one-dark")); } catch (e) { /* optional */ }
+
+        const langExt = lang => (lang === 'py' ? python() : cpp());
+        const themeExt = dark => (dark && oneDark ? oneDark : []);
+        const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+
+        window.buildEditor = (mount, lang = 'cpp', doc = '') => {
+          mount.innerHTML = '';
+          mount.classList.add('editor-wrap');
+          const langComp = new Compartment();
+          const themeComp = new Compartment();
+          const base = [basicSetup, keymap.of([indentWithTab, ...defaultKeymap])];
+          const make = (themeOn) => new EditorView({
+            state: EditorState.create({ doc, extensions: [...base, langComp.of(langExt(lang)), themeComp.of(themeExt(themeOn))] }),
+            parent: mount
+          });
+          let view;
+          try { view = make(isDark()); }
+          catch (e) { console.warn('theme extension failed, retrying without it', e); oneDark = null; mount.innerHTML = ''; view = make(false); }
+          view.__langComp = langComp; view.__themeComp = themeComp;
+          return view;
+        };
+        window.switchLanguage = (view, lang) => view.dispatch({ effects: view.__langComp.reconfigure(langExt(lang)) });
+        window.setEditorTheme = (view, dark) => { try { view.dispatch({ effects: view.__themeComp.reconfigure(themeExt(dark)) }); } catch (e) {} };
+      } catch (e) {
+        console.warn('CodeMirror failed to load, using textarea fallback', e);
+      } finally {
+        window.__cmResolve && window.__cmResolve();
+      }
+    })();
+  </script>
+</head>
+<body>
+  <!-- NAV -->
+  <nav id="nav" class="topnav">
+    <div class="max-w-5xl mx-auto px-4 h-14 flex items-center gap-3">
+      <span class="brand">Grader</span>
+
+      <div id="navTabs" class="hidden items-center gap-1 ml-4 scroll-x">
+        <button data-goto="projects" class="tab">โจทย์</button>
+        <button data-goto="subs" class="tab">ประวัติการส่ง</button>
+        <button id="navAdmin" class="tab hidden">จัดการระบบ</button>
+      </div>
+
+      <div class="flex-1"></div>
+
+      <button id="themeBtn" class="iconbtn" title="สลับโหมดสว่าง/มืด" aria-label="สลับธีม"></button>
+      <div id="navUser" class="hidden items-center gap-3">
+        <span id="who" class="text-sm hide-sm"></span>
+        <span id="avatar" class="hidden"></span>
+        <button id="logoutBtn" class="btn btn-sm">ออกจากระบบ</button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- LOGIN -->
+  <section id="loginSection">
+    <div class="max-w-sm mx-auto px-4 pt-16">
+      <h1 class="title mb-4">เข้าสู่ระบบ</h1>
+      <form id="loginForm" class="box p-5 space-y-3" method="post" onsubmit="return false">
+        <div class="field"><label for="lu">ชื่อผู้ใช้</label><input id="lu" class="input" name="username" autocomplete="username" required /></div>
+        <div class="field"><label for="lp">รหัสผ่าน</label><input id="lp" class="input" name="password" type="password" autocomplete="current-password" required /></div>
+        <button class="btn btn-primary w-full" id="loginBtn">เข้าสู่ระบบ</button>
+        <p id="loginMsg" class="err" role="alert"></p>
+      </form>
+      <p class="text-sm muted mt-3">ยังไม่มีบัญชี? <button id="gotoRegister" class="link">สมัครสมาชิก</button></p>
+    </div>
+  </section>
+
+  <!-- REGISTER -->
+  <section id="registerSection" class="hidden">
+    <div class="max-w-sm mx-auto px-4 pt-16">
+      <h1 class="title mb-4">สมัครสมาชิก</h1>
+      <form id="regForm" class="box p-5 space-y-3" method="post" onsubmit="return false">
+        <div class="field"><label for="ru">ชื่อผู้ใช้</label><input id="ru" class="input" name="username" autocomplete="username" required /></div>
+        <div class="field"><label for="rp">รหัสผ่าน (ต้องมีตัวเลขอย่างน้อย 1 ตัว)</label><input id="rp" class="input" name="password" type="password" autocomplete="new-password" required /></div>
+        <div class="field"><label for="rc">ยืนยันรหัสผ่าน</label><input id="rc" class="input" name="confirm" type="password" autocomplete="new-password" required /></div>
+        <button class="btn btn-primary w-full" id="regBtn">สมัครสมาชิก</button>
+        <p id="regMsg" class="err" role="alert"></p>
+      </form>
+      <p class="text-sm muted mt-3">มีบัญชีแล้ว? <button id="backToLogin" class="link">กลับไปเข้าสู่ระบบ</button></p>
+    </div>
+  </section>
+
+  <!-- PROJECTS PAGE -->
+  <section id="projectsPage" class="hidden">
+    <div class="max-w-5xl mx-auto px-4 py-6 space-y-4">
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 class="title" id="projTitle">โจทย์</h1>
+          <div id="projStats" class="muted text-sm mt-1"></div>
+        </div>
+        <div class="field w-full sm:w-72">
+          <label for="projSelect">โปรเจกต์</label>
+          <select id="projSelect" class="select"></select>
+        </div>
+      </div>
+      <div class="box scroll-x" id="problemsWrap"></div>
+    </div>
+  </section>
+
+  <!-- PROBLEM PAGE -->
+  <section id="problemPage" class="hidden">
+    <div class="max-w-6xl mx-auto px-4 py-5 space-y-3">
+      <div class="flex flex-wrap items-center gap-3">
+        <button id="backToProjects" class="btn btn-sm">← กลับ</button>
+        <h1 id="pbHeader" class="title"></h1>
+        <span id="pbChip"></span>
+      </div>
+      <div class="grid lg:grid-cols-2 gap-4 items-start">
+        <div class="box p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="font-semibold">โจทย์ (PDF)</div>
+            <a id="pdfOpenNew" class="link text-sm" href="#" target="_blank" rel="noopener">เปิดในแท็บใหม่</a>
+          </div>
+          <div class="pdf-box"><iframe id="pdfFrame" title="โจทย์" src=""></iframe></div>
+        </div>
+        <div class="box p-3 space-y-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <label for="langSel" class="text-sm">ภาษา</label>
+            <div class="w-32"><select id="langSel" class="select">
+              <option value="cpp">C++</option>
+              <option value="py">Python</option>
+            </select></div>
+            <span id="draftNote" class="muted text-xs hide-sm"></span>
+            <div class="flex-1"></div>
+            <input type="file" id="codeFile" class="hidden" accept=".cpp,.cc,.c,.py,.txt,text/plain">
+            <button id="useFile" class="btn btn-sm" type="button">นำโค้ดจากไฟล์</button>
+          </div>
+          <div id="editorMount"></div>
+
+          <details id="runPanel" class="box p-3">
+            <summary class="font-medium text-sm">รันทดสอบด้วย input ของตัวเอง (ไม่นับเป็นการส่งคำตอบ)</summary>
+            <div class="mt-3 space-y-2">
+              <div class="field"><label for="runInput">input</label>
+                <textarea id="runInput" class="textarea mono" rows="3" placeholder="พิมพ์ input ที่จะป้อนให้โปรแกรม"></textarea></div>
+              <div class="flex items-center gap-3">
+                <button id="runBtn" class="btn btn-sm" type="button">รัน</button>
+                <span id="runMsg" class="text-sm muted"></span>
+              </div>
+              <div id="runResultBox"></div>
+            </div>
+          </details>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button id="submitBtn" class="btn btn-primary">ส่งคำตอบ</button>
+            <span class="muted text-xs hide-sm"><span class="kbd">Ctrl</span>+<span class="kbd">Enter</span></span>
+            <span id="submitMsg" class="text-sm muted"></span>
+          </div>
+          <div id="resultBox"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SUBMISSIONS PAGE -->
+  <section id="subsPage" class="hidden">
+    <div class="max-w-5xl mx-auto px-4 py-6 space-y-4">
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 class="title">ประวัติการส่ง</h1>
+          <div id="subsStats" class="muted text-sm mt-1"></div>
+        </div>
+        <div class="field w-40">
+          <label for="subsFilterSel">แสดง</label>
+          <select id="subsFilterSel" class="select">
+            <option value="all">ทั้งหมด</option>
+            <option value="green">ผ่านครบ</option>
+            <option value="other">ยังไม่ผ่านครบ</option>
+          </select>
+        </div>
+      </div>
+      <div id="subsWrap" class="box"></div>
+    </div>
+  </section>
+
+  <!-- ADMIN PAGE -->
+  <section id="adminPage" class="hidden">
+    <div class="max-w-5xl mx-auto px-4 py-6 space-y-4">
+      <h1 class="title">จัดการระบบ</h1>
+      <div class="utabs" id="adminTabs">
+        <button data-t="content" class="on">โปรเจกต์และโจทย์</button>
+        <button data-t="users">ผู้ใช้</button>
+        <button data-t="subs">ซับมิท</button>
+      </div>
+
+      <div data-panel="content" class="space-y-4">
+        <div class="grid md:grid-cols-2 gap-4">
+          <div class="box p-4 space-y-3">
+            <h3 class="font-semibold">สร้างโปรเจกต์</h3>
+            <div class="field"><label for="projName">ชื่อโปรเจกต์</label><input id="projName" class="input"></div>
+            <div class="field"><label for="projSlug">slug (ห้ามซ้ำ)</label><input id="projSlug" class="input"></div>
+            <label class="inline-flex items-center gap-2 text-sm"><input id="projEnabled" type="checkbox"> เปิดใช้งานทันที</label>
+            <div><button id="createProj" class="btn btn-primary">สร้าง</button></div>
+            <div id="projList" class="text-sm"></div>
+          </div>
+          <div class="box p-4 space-y-3">
+            <h3 class="font-semibold">สร้างโจทย์</h3>
+            <div class="field"><label for="pbTitle">ชื่อโจทย์</label><input id="pbTitle" class="input"></div>
+            <div class="field"><label for="pbProject">โปรเจกต์</label><select id="pbProject" class="select"></select></div>
+            <div class="field"><label for="pbTests">Testcases (1 บรรทัดต่อ 1 เคส) รูปแบบ <code>input =&gt; expected</code></label>
+              <details class="text-sm mb-2">
+                <summary class="link">วิธีเขียนเทสเคส (ละเอียด)</summary>
+                <div class="mt-2 space-y-2">
+                  <p><b>1 บรรทัด = 1 เคส</b> เขียนเป็น <code>input =&gt; expected</code> ซ้ายมือคือข้อมูลที่ป้อนเข้าโปรแกรม (stdin) ขวามือคือ output ที่ถูกต้อง บรรทัดว่างจะถูกข้าม</p>
+                  <p><b>input หรือ expected หลายบรรทัด</b> ให้ใช้ <code>\n</code> แทนการขึ้นบรรทัดใหม่ เพราะ 1 เคสต้องอยู่ในบรรทัดเดียว</p>
+                  <p><b>เครื่องหมาย \ จริงๆ</b> ให้พิมพ์ <code>\\</code> เช่น <code>a\\nb</code> จะได้ตัวอักษร a \ n b (ไม่ขึ้นบรรทัดใหม่)</p>
+                  <p><b>ว่างเปล่าได้ทั้งสองฝั่ง</b> เช่น <code>=&gt; x</code> (ไม่มี input) หรือ <code>5 =&gt;</code> (ไม่มี output)</p>
+                  <p><b>ตัวอย่าง</b></p>
+                  <pre class="log mono" style="white-space:pre-wrap">1 2 =&gt; 3
+3\n10\n20\n30 =&gt; 60
+3\n3 1 2 =&gt; 1\n2\n3
+hello world =&gt; HELLO WORLD</pre>
+                  <p class="muted">เคสที่ 2 ป้อน 4 บรรทัด (3, 10, 20, 30) คาดหวัง output 60 · เคสที่ 3 ป้อน 2 บรรทัด (3 และ 3 1 2) คาดหวัง output 3 บรรทัด (1, 2, 3)</p>
+                  <p><b>การเทียบคำตอบ:</b> ระบบถือว่า CRLF เท่ากับ LF และตัดช่องว่าง/บรรทัดว่างที่หัวและท้ายของ output ทั้งก้อนก่อนเทียบ แต่ช่องว่างระหว่างคำและท้ายแต่ละบรรทัดต้องตรงเป๊ะ (<code>1 2</code> ไม่เท่ากับ <code>1  2</code>)</p>
+                  <p><b>ข้อจำกัด:</b> ใช้ <code>=&gt;</code> ได้ 1 ครั้งต่อบรรทัด (ตัวหลังจะถูกตัดทิ้ง) ถ้า input หรือ expected ต้องมี <code>=&gt;</code> ให้สร้างด้วยเคสอื่นก่อน แล้วไปแก้ที่ปุ่ม "แก้ไข" ในรายการโจทย์ ซึ่งไม่มีการแปลงตัวอักษรพิเศษ</p>
+                  <p class="muted">สร้างแล้วแก้ทีหลังได้ที่ปุ่ม "แก้ไข" ข้างโจทย์ (รูปแบบ <code>@@ input</code> / <code>@@ expected</code> ซึ่งขึ้นบรรทัดใหม่ได้จริง)</p>
+                </div>
+              </details>
+              <textarea id="pbTests" class="textarea mono" rows="6" placeholder="1 2 =&gt; 3&#10;3\n10\n20\n30 =&gt; 60&#10;hello world =&gt; HELLO WORLD"></textarea></div>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="field"><label for="pbTime">เวลาต่อเทสต์ (มิลลิวินาที) 100–10000</label><input id="pbTime" class="input" type="number" min="100" max="10000" step="100" value="2000"></div>
+              <div class="field"><label for="pbMem">หน่วยความจำ (MB) 16–1024</label><input id="pbMem" class="input" type="number" min="16" max="1024" step="16" value="256"></div>
+            </div>
+            <div class="field"><label for="pbPdf">ไฟล์ PDF โจทย์</label><input id="pbPdf" type="file" accept="application/pdf" class="text-sm"></div>
+            <div><button id="createPb" class="btn btn-primary">สร้างโจทย์</button></div>
+          </div>
+        </div>
+        <div class="box p-4">
+          <h3 class="font-semibold mb-2">โจทย์ทั้งหมด</h3>
+          <div id="pbList" class="text-sm"></div>
+        </div>
+      </div>
+
+      <div data-panel="users" class="hidden">
+        <div class="box p-4">
+          <h3 class="font-semibold mb-2">ผู้ใช้</h3>
+          <div id="userList" class="text-sm"></div>
+        </div>
+      </div>
+
+      <div data-panel="subs" class="hidden">
+        <div class="box p-4 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <h3 class="font-semibold">ซับมิททั้งหมด <span id="subsCount" class="muted font-normal text-sm"></span></h3>
+            <input id="subsSearch" class="input sm:w-64" placeholder="ค้นหาชื่อผู้ใช้" aria-label="ค้นหาผู้ใช้">
+          </div>
+          <div id="allSubs" class="text-sm space-y-2"></div>
+          <div class="text-center"><button id="moreSubs" class="btn btn-sm hidden">แสดงเพิ่ม</button></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="toasts" aria-live="polite"></div>
+  <script src="/public/app.js"></script>
+</body>
+</html>
