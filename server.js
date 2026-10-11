@@ -144,6 +144,19 @@ if (process.env.TRUST_PROXY) {
   app.set('trust proxy', /^\d+$/.test(tp) ? Number(tp) : tp === 'true' ? true : tp);
 }
 
+/* Sign-in through Open WebUI's hosted-services gatekeeper: it only proxies logged-in users and adds X-Webui-Viewer-Email /
+   X-Webui-Viewer-Name. Those headers are only trustworthy when nothing else can reach this port, so this needs HOST=127.0.0.1. */
+const WEBUI_HEADER_AUTH = process.env.WEBUI_HEADER_AUTH === '1';
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+if (WEBUI_HEADER_AUTH && !['127.0.0.1', '::1', 'localhost'].includes(process.env.HOST || '')) {
+  console.error('FATAL: WEBUI_HEADER_AUTH=1 needs HOST=127.0.0.1 (anyone who can reach the port could fake the identity header)');
+  process.exit(1);
+}
+const viewerEmail = req => WEBUI_HEADER_AUTH ? String(req.get('x-webui-viewer-email') || '').trim().toLowerCase() : '';
+
+/* Origins allowed to POST besides this server's own Host (a proxy rewrites Host, e.g. PUBLIC_ORIGINS=https://grader.example.com). */
+const PUBLIC_ORIGINS = (process.env.PUBLIC_ORIGINS || '').split(',').map(o => o.trim().replace(/\/$/, '')).filter(Boolean);
+
 /* Security + DoS */
 app.use(helmet({ contentSecurityPolicy: false }));
 // API calls only (static files/PDFs are not limited). A classroom behind one NAT shares an IP, so this is per IP, not per student.
@@ -151,7 +164,8 @@ const limiter = rateLimit({
   windowMs: 1000,
   max: Number(process.env.API_RATE_PER_SEC) || 30,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  keyGenerator: req => viewerEmail(req) || req.ip   // signed in via Open WebUI: per person, not per school NAT
 });
 app.use('/api', limiter);
 
@@ -173,11 +187,45 @@ app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin) {
     let ok = false;
-    try { ok = new URL(origin).host === req.headers.host; } catch {}
+    try { ok = new URL(origin).host === req.headers.host || PUBLIC_ORIGINS.includes(new URL(origin).origin); } catch {}
     if (!ok) return res.status(403).json({ ok: false, error: 'bad_origin' });
   }
   next();
 });
+
+/* Open WebUI identity -> grader account (created on first visit, matched by email). ADMIN_EMAILS are always admin. */
+async function userFromViewer(email, rawName) {
+  let name = '';
+  try { name = decodeURIComponent(rawName || ''); } catch {}
+  name = (name.trim() || email.split('@')[0]).replace(/\s+/g, ' ').slice(0, MAX_USERNAME);
+  let user = null;
+  await updateJSON(USERS, users => {
+    const u = users.find(x => (x.email || '').toLowerCase() === email);
+    const wantAdmin = ADMIN_EMAILS.includes(email);
+    if (u) {
+      user = u;
+      if (wantAdmin && !u.isAdmin) { u.isAdmin = true; return; }
+      return NO_WRITE;
+    }
+    let username = name, n = 2;
+    while (users.some(x => String(x.username).toLowerCase() === username.toLowerCase())) username = `${name.slice(0, MAX_USERNAME - 4)}-${n++}`;
+    user = { id: uuid(), username, email, passhash: null, isAdmin: wantAdmin || users.length === 0 };
+    users.push(user);
+  });
+  return user;
+}
+if (WEBUI_HEADER_AUTH) {
+  app.use(async (req, res, next) => {
+    try {
+      const email = viewerEmail(req);
+      if (!email) return next();
+      if (req.session?.user?.email === email) return next();
+      const u = await userFromViewer(email, req.get('x-webui-viewer-name'));
+      await startSession(req, u);
+      next();
+    } catch (e) { next(e); }
+  });
+}
 
 /* Static */
 app.use('/public', express.static(path.join(__dirname, 'public')));
@@ -226,7 +274,7 @@ function startSession(req, user) {
   return new Promise((resolve, reject) => {
     req.session.regenerate(err => {
       if (err) return reject(err);
-      req.session.user = { id: user.id, username: user.username, isAdmin: !!user.isAdmin };
+      req.session.user = { id: user.id, username: user.username, isAdmin: !!user.isAdmin, email: user.email || undefined };
       resolve(req.session.user);
     });
   });
@@ -309,7 +357,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   }
   const users = await readJSON(USERS, []);
   const u = users.find(x => String(x.username).toLowerCase() === username.toLowerCase());
-  const ok = await bcrypt.compare(password, u ? u.passhash : DUMMY_HASH);
+  const ok = await bcrypt.compare(password, u?.passhash || DUMMY_HASH) && !!u?.passhash;   // Open WebUI accounts have no password
   if (!u || !ok) return res.json({ ok: false, error: 'invalid_login' });
   res.locals.authOk = true;
   res.json({ ok: true, user: await startSession(req, u) });
@@ -654,6 +702,16 @@ function runJob(runFn, budgetMs) {
   });
 }
 
+// Proxies in front (Open WebUI's gatekeeper: 30 s, Cloudflare: 100 s) drop a request that sends nothing for a while, and a big problem
+// can take longer than that to grade. Send the headers now and a space every 10 s; leading whitespace is still valid JSON.
+function keepAlive(res) {
+  res.status(200).set({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+  res.flushHeaders();
+  const t = setInterval(() => res.write(' '), 10_000);
+  res.on('close', () => clearInterval(t));
+  return body => { clearInterval(t); res.end(JSON.stringify(body)); };
+}
+
 // One grading job per user at a time (a 1000-test problem takes ~45 s; stacking submissions would starve everyone else),
 // and refuse new work when the queue is already deep.
 const MAX_QUEUE = Number(process.env.GRADER_MAX_QUEUE) || 40;
@@ -683,17 +741,18 @@ app.post('/api/run', requireAuth, oneJobPerUser, async (req, res) => {
   limits = { ...limits, clipChars: 100_000 };   // one test, shown to the student: keep far more of the output than a stored submission does
 
   const stdin = String(input ?? '').slice(0, 100_000);
+  const reply = keepAlive(res);
   let result;
   try {
     result = await runJob(signal =>
       runInScratch(runDir => gradeOne(language, code, [{ input: stdin, expected: null }], runDir, { ...limits, signal })),
       overallBudgetMs(1, limits));
   } catch (e) {
-    return res.json({ ok: false, error: 'runner_error', detail: String(e.message || e).slice(0, 300) });
+    return reply({ ok: false, error: 'runner_error', detail: String(e.message || e).slice(0, 300) });
   }
 
   const r0 = result.results[0] || {};
-  res.json({
+  reply({
     ok: true,
     compileOk: result.compileOk,
     compileLog: result.compileOk ? '' : (result.compileLog || ''),
@@ -722,13 +781,14 @@ app.post('/api/submit', requireAuth, oneJobPerUser, async (req, res) => {
 
   const limits = normalizeLimits(pb);
   const testsRev = pb.testsRev || 0;   // the revision of the tests this submission is graded against
+  const reply = keepAlive(res);
   let result;
   try {
     result = await runJob(signal =>
       runInScratch(runDir => gradeOne(language, code, pb.tests, runDir, { ...limits, signal })),
       overallBudgetMs(pb.tests.length, limits));
   } catch (e) {
-    return res.json({ ok:false, error:'runner_error', detail: String(e.message||e).slice(0,300) });
+    return reply({ ok:false, error:'runner_error', detail: String(e.message||e).slice(0,300) });
   }
 
   const total = pb.tests.length;
@@ -754,7 +814,7 @@ app.post('/api/submit', requireAuth, oneJobPerUser, async (req, res) => {
   // appended under the file lock: simultaneous submissions can no longer overwrite each other
   await updateJSON(SUBMISSIONS, submissions => { submissions.push(sub); });
 
-  res.json({ ok: true, submission: publicSubmission(sub) });
+  reply({ ok: true, submission: publicSubmission(sub) });
 });
 
 /* Submissions (mine/admin) */
