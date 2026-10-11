@@ -690,7 +690,7 @@ async function renderAdmin() {
           <b>${esc(pb.title)}</b>
           <span class="muted">· ${esc(pb.projectName)}${pb.projectEnabled ? '' : ' (ปิดอยู่)'}</span>
           <a class="link ml-2 text-xs" href="${esc(pb.pdfUrl)}" target="_blank" rel="noopener">PDF</a>
-          <div class="muted text-xs">${(pb.tests || []).length} เทสต์เคส · เวลา ${esc(pb.timeLimitMs)} ms · หน่วยความจำ ${esc(pb.memLimitMB)} MB</div>
+          <div class="muted text-xs">${pb.testCount ?? (pb.tests || []).length} เทสต์เคส · เวลา ${esc(pb.timeLimitMs)} ms · หน่วยความจำ ${esc(pb.memLimitMB)} MB</div>
         </div>
         <div class="flex items-center gap-2">
           <button class="btn btn-sm editPb">แก้ไข</button>
@@ -792,6 +792,7 @@ const ADMIN_ERR = {
   bad_mem_limit: 'หน่วยความจำต้องเป็นจำนวนเต็ม 16–1024 MB',
   no_tests: 'ต้องมีอย่างน้อย 1 เทสต์เคส',
   too_many_tests: 'เทสต์เคสเกิน 5000 เคส',
+  tests_too_large: 'เทสต์ทั้งข้อรวมกันเกิน 128 ล้านตัวอักษร',
   bad_title: 'ชื่อโจทย์ไม่ถูกต้อง (1–200 ตัวอักษร)',
   bad_project: 'ไม่พบโปรเจกต์ที่เลือก',
   not_found: 'ไม่พบโจทย์ (อาจถูกลบไปแล้ว)',
@@ -800,7 +801,7 @@ const ADMIN_ERR = {
 };
 function adminErrText(code) {
   let m;
-  if ((m = /^test_too_large_(\d+)$/.exec(code))) return `เคสที่ ${m[1]} ใหญ่เกิน 100,000 ตัวอักษร`;
+  if ((m = /^test_too_large_(\d+)$/.exec(code))) return `เคสที่ ${m[1]} ใหญ่เกิน 16 ล้านตัวอักษร`;
   if ((m = /^bad_test_(\d+)$/.exec(code))) return `เคสที่ ${m[1]} ไม่ถูกต้อง`;
   if ((m = /^bad_test_line_(\d+)$/.exec(code))) return `บรรทัดที่ ${m[1]} ไม่มีเครื่องหมาย => คั่นระหว่าง input กับ expected`;
   return ADMIN_ERR[code] || code || 'ผิดพลาด';
@@ -842,11 +843,18 @@ function toggleProblemEditor(pb, row, projects) {
           <p><b>พิมพ์ขึ้นบรรทัดใหม่จริงได้เลย</b> โหมดนี้ไม่มีการแปลง <code>\n</code> หรือตัวอักษรพิเศษใดๆ และใส่ <code>=&gt;</code> ในข้อความได้</p>
           <p><b>input หรือ expected ว่างเปล่าได้:</b> เว้นบรรทัดไว้ใต้หัวข้อนั้นเลย บรรทัดว่างท้ายแต่ละส่วนจะถูกตัดทิ้ง</p>
           <p><b>การเทียบคำตอบ:</b> CRLF เท่ากับ LF, ตัดช่องว่าง/บรรทัดว่างหัวท้ายของ output ทั้งก้อนก่อนเทียบ แต่ช่องว่างระหว่างคำและท้ายแต่ละบรรทัดต้องตรงเป๊ะ</p>
-          <p><b>ข้อจำกัด:</b> 1–5000 เคส, แต่ละ input/expected ไม่เกิน 100,000 ตัวอักษร, ต้องมีอย่างน้อย 1 เคส</p>
+          <p><b>ข้อจำกัด:</b> 1–5000 เคส, แต่ละ input/expected ไม่เกิน 16 ล้านตัวอักษร, รวมทั้งข้อไม่เกิน 128 ล้านตัวอักษร, ต้องมีอย่างน้อย 1 เคส</p>
+          <p><b>เทสต์ใหญ่:</b> ถ้าชุดเทสต์ใหญ่เกิน 2 ล้านตัวอักษร จะไม่แสดงในช่องนี้ ให้กด "ดาวน์โหลดเป็นไฟล์" ไปแก้ แล้ว "นำเข้าจากไฟล์" กลับมา (รูปแบบเดียวกัน)</p>
           <p class="muted">เมื่อแก้ชุดเทสต์ ผลที่นักเรียนส่งไปก่อนหน้าจะไม่นับในคะแนน (ขึ้นป้าย "เทสต์ชุดเดิม") การแก้แค่เวลา/หน่วยความจำ/ชื่อ ไม่กระทบ</p>
         </div>
       </details>
-      <textarea class="textarea mono e-tests" rows="14" spellcheck="false"></textarea>
+      <div class="flex flex-wrap items-center gap-2 mb-2 text-sm">
+        <a class="link e-dl" href="/api/admin/problems/tests.txt?id=${encodeURIComponent(pb.id)}">ดาวน์โหลดเป็นไฟล์ .txt</a>
+        <span class="muted">·</span>
+        <label class="link">นำเข้าจากไฟล์ .txt<input class="e-file hidden" type="file" accept=".txt,text/plain"></label>
+      </div>
+      <div class="muted text-sm e-big hidden"></div>
+      <textarea class="textarea mono e-tests" rows="14" spellcheck="false" placeholder="กำลังโหลดเทสต์เคส..." disabled></textarea>
     </div>
     <div class="muted text-xs">การแก้ไขมีผลกับการส่งครั้งถัดไป — ผลของซับมิทที่ส่งไปแล้วจะไม่ถูกตัดใหม่</div>
     <div class="flex flex-wrap items-center gap-2">
@@ -864,21 +872,53 @@ function toggleProblemEditor(pb, row, projects) {
   row.after(panel);
 
   const q = s => panel.querySelector(s);
-  const ta = q('.e-tests'), msg = q('.e-msg'), saveBtn = q('.e-save');
-  ta.value = testsToText(pb.tests);
-  const updateCount = () => { const p = textToTests(ta.value); q('.e-count').textContent = p.error ? 'รูปแบบยังไม่ถูกต้อง' : `${p.tests.length} เคส`; };
+  const ta = q('.e-tests'), msg = q('.e-msg'), saveBtn = q('.e-save'), big = q('.e-big');
+  // Tests are fetched on demand. A big set never goes into the textarea: it stays untouched unless a file is imported.
+  let mode = 'loading', fileTests = null;   // 'loading' | 'text' | 'big' (server copy kept) | 'file' (imported, replaces on save)
+  const updateCount = () => {
+    if (mode === 'text') { const p = textToTests(ta.value); q('.e-count').textContent = p.error ? 'รูปแบบยังไม่ถูกต้อง' : `${p.tests.length} เคส`; }
+  };
+  const showBig = text => { mode = mode === 'file' ? 'file' : 'big'; ta.classList.add('hidden'); big.classList.remove('hidden'); big.textContent = text; };
   ta.addEventListener('input', updateCount);
-  updateCount();
+  api(`/api/admin/problems/tests?id=${encodeURIComponent(pb.id)}`).then(r => {
+    if (mode !== 'loading') return;
+    if (!r.ok) { msg.textContent = adminErrText(r.error); msg.style.color = 'var(--bad)'; return; }
+    if (r.tooLarge) {
+      q('.e-count').textContent = `${r.testCount} เคส`;
+      showBig(`ชุดเทสต์ใหญ่ (${(r.totalChars / 1e6).toFixed(1)} ล้านตัวอักษร) จึงไม่แสดงในหน้าเว็บ — กดบันทึกได้ตามปกติ เทสต์เดิมจะไม่ถูกแตะ`);
+      return;
+    }
+    mode = 'text'; ta.disabled = false; ta.placeholder = ''; ta.value = testsToText(r.tests); updateCount();
+  });
+  q('.e-file').addEventListener('change', async ev => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    msg.textContent = 'กำลังอ่านไฟล์...'; msg.style.color = '';
+    const text = await f.text();
+    const p = textToTests(text);
+    if (p.error) { msg.textContent = `ไฟล์ ${f.name}: ${p.error}`; msg.style.color = 'var(--bad)'; return; }
+    msg.textContent = '';
+    if (text.length <= 2 * 1024 * 1024) {
+      mode = 'text'; ta.disabled = false; ta.classList.remove('hidden'); big.classList.add('hidden'); ta.value = text; updateCount();
+    } else {
+      mode = 'file'; fileTests = p.tests; q('.e-count').textContent = `${p.tests.length} เคส`;
+      showBig(`นำเข้า ${f.name}: ${p.tests.length} เคส (${(text.length / 1e6).toFixed(1)} ล้านตัวอักษร) — กดบันทึกเพื่อแทนที่เทสต์เดิมทั้งหมด`);
+    }
+  });
   q('.e-cancel').addEventListener('click', () => panel.remove());
 
   saveBtn.addEventListener('click', async () => {
-    if (saveBtn.disabled) return;
-    const parsed = textToTests(ta.value);
-    if (parsed.error) { msg.textContent = parsed.error; msg.style.color = 'var(--bad)'; return; }
+    if (saveBtn.disabled || mode === 'loading') return;
+    let tests;
+    if (mode === 'text') {
+      const parsed = textToTests(ta.value);
+      if (parsed.error) { msg.textContent = parsed.error; msg.style.color = 'var(--bad)'; return; }
+      tests = parsed.tests;
+    } else if (mode === 'file') tests = fileTests;
     saveBtn.disabled = true; msg.textContent = 'กำลังบันทึก...'; msg.style.color = '';
     const r = await api('/api/admin/problems/update', { method: 'POST', body: JSON.stringify({
       id: pb.id, title: q('.e-title').value.trim(), projectId: q('.e-proj').value,
-      timeLimitMs: Number(q('.e-time').value), memLimitMB: Number(q('.e-mem').value), tests: parsed.tests
+      timeLimitMs: Number(q('.e-time').value), memLimitMB: Number(q('.e-mem').value), tests
     }) });
     saveBtn.disabled = false;
     if (r.ok) { toast('บันทึกโจทย์แล้ว', 'ok'); renderAdmin(); }

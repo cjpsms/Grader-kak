@@ -41,6 +41,30 @@ await ensureFile(PROJECTS, '[]');
 await ensureFile(PROBLEMS, '[]');
 await ensureFile(SUBMISSIONS, '[]');
 
+/* Test cases live in data/tests/<problemId>.json, not in problems.json: a full-size problem can carry tens of MB of tests, and
+   problems.json is read on every page load. problems.json keeps only `testCount`. */
+const TESTS_DIR = path.join(DATA, 'tests');
+await fs.mkdir(TESTS_DIR, { recursive: true });
+const testsFile = id => path.join(TESTS_DIR, String(id).replace(/[^A-Za-z0-9-]/g, '_') + '.json');
+async function loadTests(id) {
+  try { return JSON.parse(await fs.readFile(testsFile(id), 'utf-8')); }
+  catch (e) { if (e.code === 'ENOENT') return []; throw e; }
+}
+const saveTests = (id, tests) => writeJSON(testsFile(id), tests.map(({ input, expected }) => ({ input, expected })));
+const removeTests = id => fs.unlink(testsFile(id)).catch(() => {});
+await updateJSON(PROBLEMS, async problems => {   // one-time migration from the old layout (tests inside problems.json)
+  let moved = 0;
+  for (const pb of problems) {
+    if (!Array.isArray(pb.tests)) continue;
+    await saveTests(pb.id, pb.tests);
+    pb.testCount = pb.tests.length;
+    delete pb.tests;
+    moved++;
+  }
+  if (!moved) return NO_WRITE;
+  console.log(`[tests] moved the tests of ${moved} problem(s) to ${TESTS_DIR}`);
+});
+
 /* Set up the sandbox that student code runs in (Windows: sandbox_runner.exe, Linux: bubblewrap). Fail closed — never grade without it. */
 try {
   initSandbox();
@@ -170,7 +194,12 @@ const limiter = rateLimit({
 app.use('/api', limiter);
 
 /* Body & Session (เพิ่มลิมิตเป็น 5MB) */
-app.use(bodyParser.json({ limit: '5mb' }));
+// Test uploads can be large (full-size contest data), so that one route parses its own body — after the admin check, so nobody
+// else can make the server buffer a huge request. Everything else stays at 5 MB.
+const BIG_JSON_ROUTE = '/api/admin/problems/update';
+const smallJson = bodyParser.json({ limit: '5mb' });
+const bigJson = bodyParser.json({ limit: process.env.MAX_TEST_UPLOAD || '256mb' });
+app.use((req, res, next) => (req.path === BIG_JSON_ROUTE ? next() : smallJson(req, res, next)));
 app.use(bodyParser.urlencoded({ extended: true, limit: '5mb' }));
 app.use(session({
   name: 'grader.sid',
@@ -472,6 +501,7 @@ app.post('/api/admin/problems/delete', requireAuth, requireAdmin, async (req, re
   if (!pb) return res.json({ ok:false, error:'not_found' });
 
   await removePdf(pb);
+  await removeTests(pb.id);
 
   // remove submissions of this problem
   let removedSubs = 0;
@@ -503,7 +533,7 @@ app.post('/api/admin/projects/delete', requireAuth, requireAdmin, async (req, re
     toRemove = problems.filter(pb => pb.projectId === id);
     return problems.filter(pb => pb.projectId !== id);
   });
-  for (const pb of toRemove) await removePdf(pb);
+  for (const pb of toRemove) { await removePdf(pb); await removeTests(pb.id); }
 
   // remove submissions of those problems
   let removedSubs = 0;
@@ -518,7 +548,7 @@ app.post('/api/admin/projects/delete', requireAuth, requireAdmin, async (req, re
 });
 
 /* Never send test inputs / expected outputs to students (admin routes return the full data) */
-const publicProblem = ({ tests, ...rest }) => ({ ...rest, ...normalizeLimits(rest), testCount: (tests || []).length });
+const publicProblem = ({ tests, ...rest }) => ({ ...rest, ...normalizeLimits(rest), testCount: rest.testCount || 0 });
 const publicSubmission = sub => ({
   ...sub,
   results: (sub.results || []).map(({ idx, pass, runMs, timedOut }) => ({ idx, pass, runMs, timedOut }))
@@ -577,7 +607,8 @@ app.post('/api/admin/problems/create', requireAuth, requireAdmin, upload.single(
   }
 
   const pdfUrl = `/pdf/${path.basename(req.file.path)}`;
-  const pb = { id: uuid(), title, projectId, pdfUrl, tests, ...limits, testsRev: 0, createdAt: Date.now() };
+  const pb = { id: uuid(), title, projectId, pdfUrl, testCount: tests.length, ...limits, testsRev: 0, createdAt: Date.now() };
+  await saveTests(pb.id, tests);
   await updateJSON(PROBLEMS, problems => { problems.push(pb); });
   res.json({ ok: true, problem: pb });
 });
@@ -585,20 +616,24 @@ app.post('/api/admin/problems/create', requireAuth, requireAdmin, upload.single(
 /* Admin: edit a problem — title, project, time/memory limits and/or the full list of test cases.
    Only fields that are present in the request are changed. `tests` replaces the whole list. */
 const MAX_TESTS = 5000;
-const MAX_TEST_FIELD = 100_000;   // same cap as the "run with input" box
+const MAX_TEST_FIELD = Number(process.env.MAX_TEST_CHARS) || 16 * 1024 * 1024;           // one input or expected
+const MAX_TESTS_TOTAL = Number(process.env.MAX_TESTS_TOTAL_CHARS) || 128 * 1024 * 1024;  // all tests of one problem
 function validateTests(tests) {
   if (!Array.isArray(tests) || tests.length === 0) return { error: 'no_tests' };   // a problem with no tests would pass any code
   if (tests.length > MAX_TESTS) return { error: 'too_many_tests' };
   const out = [];
+  let total = 0;
   for (let i = 0; i < tests.length; i++) {
     const t = tests[i];
     if (!t || !isStr(t.input) || !isStr(t.expected)) return { error: `bad_test_${i + 1}` };
     if (t.input.length > MAX_TEST_FIELD || t.expected.length > MAX_TEST_FIELD) return { error: `test_too_large_${i + 1}` };
-    out.push({ input: t.input, expected: t.expected, line: i + 1 });
+    total += t.input.length + t.expected.length;
+    if (total > MAX_TESTS_TOTAL) return { error: 'tests_too_large' };
+    out.push({ input: t.input, expected: t.expected });
   }
   return { tests: out };
 }
-app.post('/api/admin/problems/update', requireAuth, requireAdmin, async (req, res) => {
+app.post(BIG_JSON_ROUTE, requireAuth, requireAdmin, bigJson, async (req, res) => {
   const { id, title, projectId, timeLimitMs, memLimitMB, tests } = req.body || {};
   if (!isStr(id) || !id) return res.json({ ok: false, error: 'missing_id' });
 
@@ -628,21 +663,53 @@ app.post('/api/admin/problems/update', requireAuth, requireAdmin, async (req, re
     patch.tests = v.tests;
   }
 
+  const newTests = patch.tests;
+  delete patch.tests;
   let updated = null;
-  await updateJSON(PROBLEMS, problems => {
+  await updateJSON(PROBLEMS, async problems => {
     const pb = problems.find(p => p.id === id);
     if (!pb) return NO_WRITE;
     // Submissions remember which revision of the tests graded them; bumping it marks older results as "graded against the old tests"
     // so the pages stop mixing them into "best score / solved" (their stored total no longer matches the problem).
-    const sameTests = patch.tests === undefined || (
-      pb.tests.length === patch.tests.length &&
-      pb.tests.every((t, i) => t.input === patch.tests[i].input && t.expected === patch.tests[i].expected));
-    if (!sameTests) pb.testsRev = (pb.testsRev || 0) + 1;
+    if (newTests !== undefined) {
+      const old = await loadTests(id);
+      const same = old.length === newTests.length &&
+        old.every((t, i) => t.input === newTests[i].input && t.expected === newTests[i].expected);
+      if (!same) {
+        await saveTests(id, newTests);
+        pb.testsRev = (pb.testsRev || 0) + 1;
+      }
+      pb.testCount = newTests.length;
+    }
     Object.assign(pb, patch, { updatedAt: Date.now() });
     updated = pb;
   });
   if (!updated) return res.json({ ok: false, error: 'not_found' });
   res.json({ ok: true, problem: { ...updated, ...normalizeLimits(updated) } });
+});
+
+/* Admin: the tests of one problem. Big sets are not sent to the page (the editor would choke on tens of MB): the page offers the
+   .txt download and a file import instead. */
+const EDITOR_MAX_CHARS = 2 * 1024 * 1024;
+app.get('/api/admin/problems/tests', requireAuth, requireAdmin, async (req, res) => {
+  const id = String(req.query.id || '');
+  if (!(await readJSON(PROBLEMS, [])).some(p => p.id === id)) return res.json({ ok: false, error: 'not_found' });
+  const tests = await loadTests(id);
+  const totalChars = tests.reduce((n, t) => n + t.input.length + t.expected.length, 0);
+  if (totalChars > EDITOR_MAX_CHARS) return res.json({ ok: true, tooLarge: true, testCount: tests.length, totalChars });
+  res.json({ ok: true, tests, totalChars });
+});
+app.get('/api/admin/problems/tests.txt', requireAuth, requireAdmin, async (req, res) => {
+  const id = String(req.query.id || '');
+  const pb = (await readJSON(PROBLEMS, [])).find(p => p.id === id);
+  if (!pb) return res.status(404).json({ ok: false, error: 'not_found' });
+  const tests = await loadTests(id);
+  res.set('Content-Type', 'text/plain; charset=utf-8');
+  res.attachment(`tests-${String(pb.title).replace(/[^\p{L}\p{N}_-]+/gu, '_').slice(0, 60) || id}.txt`);
+  for (let i = 0; i < tests.length; i++) {
+    if (!res.write(`${i ? '\n\n' : ''}@@ input\n${tests[i].input}\n@@ expected\n${tests[i].expected}`)) await new Promise(r => res.once('drain', r));
+  }
+  res.end('\n');
 });
 
 /* Admin: replace a problem's PDF */
@@ -773,7 +840,7 @@ app.post('/api/submit', requireAuth, oneJobPerUser, async (req, res) => {
   const problems = await readJSON(PROBLEMS, []);
   const pb = problems.find(p => p.id === problemId);
   if (!pb) return res.json({ ok: false, error: 'problem_not_found' });
-  if (!pb.tests?.length) return res.json({ ok: false, error: 'problem_has_no_tests' });
+  if (!pb.testCount) return res.json({ ok: false, error: 'problem_has_no_tests' });
   if (!req.user.isAdmin) {   // students only see problems of enabled projects; don't let them grade against hidden ones by id
     const proj = (await readJSON(PROJECTS, [])).find(p => p.id === pb.projectId);
     if (!proj?.enabled) return res.json({ ok: false, error: 'problem_not_found' });
@@ -781,17 +848,19 @@ app.post('/api/submit', requireAuth, oneJobPerUser, async (req, res) => {
 
   const limits = normalizeLimits(pb);
   const testsRev = pb.testsRev || 0;   // the revision of the tests this submission is graded against
+  const tests = await loadTests(pb.id);
+  if (!tests.length) return res.json({ ok: false, error: 'problem_has_no_tests' });
   const reply = keepAlive(res);
   let result;
   try {
     result = await runJob(signal =>
-      runInScratch(runDir => gradeOne(language, code, pb.tests, runDir, { ...limits, signal })),
-      overallBudgetMs(pb.tests.length, limits));
+      runInScratch(runDir => gradeOne(language, code, tests, runDir, { ...limits, signal })),
+      overallBudgetMs(tests.length, limits));
   } catch (e) {
     return reply({ ok:false, error:'runner_error', detail: String(e.message||e).slice(0,300) });
   }
 
-  const total = pb.tests.length;
+  const total = tests.length;
   const pass = result.results.filter(r => r.pass).length;
   let status = 'yellow';
   if (!result.compileOk) status = 'gray';
