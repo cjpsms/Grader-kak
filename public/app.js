@@ -717,7 +717,7 @@ async function renderAdmin() {
       row.innerHTML = `
         <div class="flex items-center gap-3 min-w-0">
           <div class="min-w-0"><b>${esc(us.username)}</b> ${mine ? '<span class="muted text-xs">(คุณ)</span>' : ''}
-            <span class="muted text-xs">${esc(us.id.slice(0, 8))}</span></div>
+            <span class="muted text-xs">${esc(us.email || us.id.slice(0, 8))}</span></div>
           ${us.isAdmin ? '<span class="chip accent">admin</span>' : ''}
         </div>
         <div class="flex items-center gap-2">
