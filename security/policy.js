@@ -62,6 +62,8 @@ const PY_BAD_MODULES = [
   'glob', 'fnmatch', 'tempfile', 'importlib', 'builtins', '_io', 'io', 'multiprocessing', 'pty', 'signal', 'mmap',
   'sqlite3', 'pickle', 'marshal', 'shelve', 'zipfile', 'tarfile', 'urllib', 'http', 'ftplib', 'smtplib', 'ssl',
   'requests', 'webbrowser', 'winreg', '_winapi', 'msvcrt', 'code', 'codeop', 'pdb', 'runpy', 'pkgutil', 'site',
+  // arbitrary-precision decimals would sidestep problems that are about writing big-number arithmetic by hand
+  'decimal', '_decimal', '_pydecimal',
 ];
 const PY_BAD_ALT = PY_BAD_MODULES.join('|');
 export const pyForbiddenRegex = [
@@ -78,6 +80,11 @@ export const pyForbiddenRegex = [
   /\bopen\s*\(/,
   /\bctypes\b/,
   /\bcffi\b/,
+  // Python refuses int <-> str conversions over 4300 digits; big-number problems rely on that limit staying in place.
+  // getattr / __dict__ would let the setter be reached through a built-up string.
+  /\bset_int_max_str_digits\b/,
+  /\bgetattr\s*\(/,
+  /\b__dict__\b/,
 ];
 
 // ฟังก์ชันตรวจโค้ด Python
