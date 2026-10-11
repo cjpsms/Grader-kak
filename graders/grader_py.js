@@ -1,14 +1,11 @@
 // graders/grader_py.js
 import { promises as fs } from 'fs';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import path from 'path';
-import { scanPythonCode, describeHits, runtimeShellPrefix, maybeSandbox } from '../security/policy.js';
+import { scanPythonCode, describeHits } from '../security/policy.js';
 
 import { isWin, runSandboxed, resolveExe } from './run_win.js';
+import { runBoxed } from './run_linux.js';
 import { normalizeLimits, clip, cut, CLIP_CHARS, RUN_OUTPUT_BYTES } from './limits.js';
-
-const pexec = promisify(exec);
 
 export async function gradePY(sourceCode, tests, workdir, limits = {}) {
   const { timeLimitMs, memLimitMB } = normalizeLimits(limits);
@@ -33,23 +30,15 @@ export async function gradePY(sourceCode, tests, workdir, limits = {}) {
     if (limits?.signal?.aborted) break;   // the request ran out of time: stop launching more tests
     const { input, expected } = tests[i];
     try {
-      const inFile = path.join(path.dirname(src), `in_${i}.txt`);
-      await fs.writeFile(inFile, input ?? '', 'utf-8');
-
       // -I: isolated mode (ไม่อ่าน user site), -B: ไม่เขียน .pyc, -S: ไม่โหลด site
-      const cmd = `python3 -I -B -S "${src}" < "${inFile}"`;
-      const shell = runtimeShellPrefix(memLimitMB, timeLimitMs)
-        + maybeSandbox(`timeout ${(timeLimitMs / 1000).toFixed(3)}s ${cmd}`);
-
       const r0 = Date.now();
       let stdout;
       if (isWin) {
         ({ stdout } = await runSandboxed(resolveExe('python'), ['-I', '-B', '-S', src],
           { input, cwd: path.dirname(src), timeoutMs: timeLimitMs, memMB: memLimitMB, maxProcs: 1, maxBuffer: RUN_OUTPUT_BYTES }));
       } else {
-        ({ stdout } = await pexec(`bash -lc '${shell}'`, {
-          timeout: timeLimitMs + 3000, maxBuffer: RUN_OUTPUT_BYTES
-        }));
+        ({ stdout } = await runBoxed('python3', ['-I', '-B', '-S', '/box/main.py'],
+          { input, workdir, timeoutMs: timeLimitMs, memMB: memLimitMB, maxProcs: 16, maxBuffer: RUN_OUTPUT_BYTES, signal: limits?.signal }));
       }
       const runMs = Date.now() - r0;
 

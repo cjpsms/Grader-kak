@@ -39,7 +39,7 @@
 | `python` / `python3` | Python 3 ต้องอยู่ใน `PATH` (Windows เรียก `python`, Linux เรียก `python3`) |
 | อินเทอร์เน็ตฝั่งผู้ใช้ | หน้าเว็บโหลด Tailwind, CodeMirror และฟอนต์จาก CDN ถ้าโหลดตัวแก้โค้ดไม่ได้ภายใน 8 วินาที จะใช้ช่องกรอกข้อความธรรมดาแทน |
 | **Windows:** .NET Framework (`csc.exe`) | มากับ Windows อยู่แล้ว ใช้คอมไพล์ตัว sandbox ครั้งแรกที่ server เริ่ม |
-| **Linux:** `bash`, (แนะนำ) `firejail` | ดู [ความปลอดภัยและ sandbox](#ความปลอดภัยและ-sandbox) |
+| **Linux:** `bwrap` (bubblewrap), `prlimit` (util-linux), cgroup v2 | ต้องมี bubblewrap ไม่งั้น server ไม่ยอมเริ่ม ดู [ความปลอดภัยและ sandbox](#ความปลอดภัยและ-sandbox) และ [รันเป็น service บน Linux](#รันเป็น-service-บน-linux) |
 
 ## เริ่มใช้งาน
 
@@ -72,13 +72,15 @@ $env:PORT = "4500"; npm start
 | `PORT` | `3000` | port ที่ฟัง |
 | `HOST` | `0.0.0.0` | ที่อยู่ที่ฟัง (`0.0.0.0` = เข้าได้จากเครื่องอื่นใน LAN) ถ้าใช้เครื่องเดียวตั้งเป็น `127.0.0.1` |
 | `SESSION_SECRET` | สุ่มให้ครั้งแรก | ความลับสำหรับเซ็น cookie ถ้าไม่ตั้ง ระบบสุ่มและเก็บที่ `data/session-secret.txt` |
+| `GRADER_CONCURRENCY` | `min(4, CPU/2)` | จำนวนงานที่ตรวจพร้อมกัน |
+| `GRADER_MAX_QUEUE` | `40` | คิวสูงสุด เกินนี้ตอบว่าคิวเต็มทันที (ไม่ค้าง) |
+| `API_RATE_PER_SEC` | `30` | จำนวนคำขอ `/api` ต่อวินาทีต่อ IP (ทั้งห้องที่ใช้เน็ตเดียวกันนับเป็น IP เดียว อย่าตั้งต่ำ) |
+| `TRUST_PROXY` | ไม่ตั้ง | ถ้าวางหลัง reverse proxy/tunnel (nginx, cloudflared) ให้ตั้ง `loopback` เพื่อใช้ IP จริงของผู้ใช้ ไม่งั้นทุกคนจะนับเป็น IP เดียว |
 
 ค่าที่ปรับในโค้ด (ไฟล์ที่เกี่ยวข้อง):
 
 | ค่า | ที่ไหน | ค่าปัจจุบัน |
 |---|---|---|
-| ตรวจพร้อมกัน | `server.js` (`MAX_CONCURRENCY`) | `min(2, จำนวน CPU)` |
-| คิวสูงสุด | `server.js` (`MAX_QUEUE`) | 40 งาน |
 | อายุ session | `server.js` (`SESSION_TTL_MS`) | 7 วัน |
 | ขีดจำกัดเวลา/หน่วยความจำ | `graders/limits.js` | ดู [เวลาและหน่วยความจำ](#เวลาและหน่วยความจำ) |
 
@@ -185,17 +187,59 @@ hello world => HELLO WORLD
      restricted token + Low integrity (อ่านโฟลเดอร์ข้อมูลของ user/`data/` ไม่ได้ เขียนนอกโฟลเดอร์ scratch ไม่ได้),
      Job Object จำกัดหน่วยความจำและจำนวนโปรเซส (สร้างโปรเซสลูก/เปิด shell ไม่ได้) และ timeout
      แต่ละงานรันใน `.sandbox/grader-<uuid>/` แล้วลบทิ้ง
-   - **Linux:** ใช้ `ulimit` (CPU, RAM, ไฟล์, fd) + `timeout` และ `firejail --net=none --private` ถ้าเครื่องมี firejail
-3. **จำกัดการใช้ทรัพยากร:** จำกัดคนตรวจพร้อมกัน, 1 งานต่อผู้ใช้, คิวสูงสุด 40, rate limit 5 คำขอ/วินาที/IP
+   - **Linux** (`graders/run_linux.js`): ทั้งตัวคอมไพเลอร์และโปรแกรมของนักเรียนรันใน **bubblewrap** แยก namespace ทั้งหมด
+     (ไม่มี network, เห็นแค่โปรเซสของตัวเอง), ระบบไฟล์มีแค่ `/usr` แบบอ่านอย่างเดียว + โฟลเดอร์งานที่ `/box` + `/tmp` ว่าง 64 MB
+     (มองไม่เห็น `data/`, home, `/etc`), ตัด capability ทั้งหมด ตอนรันโฟลเดอร์งานเป็นแบบอ่านอย่างเดียว
+     ถ้า server รันเป็น systemd service ที่มี `Delegate=memory pids` แต่ละการรันจะได้ cgroup ของตัวเอง:
+     `memory.max` ตาม limit ของโจทย์ (ไม่มี swap, เกินแล้วขึ้น Memory limit exceeded), `pids.max` (fork bomb ไม่ได้)
+     และตอนหมดเวลาใช้ `cgroup.kill` ฆ่าทุกโปรเซสของงานนั้นทีเดียว ถ้าไม่มี cgroup จะจำกัดหน่วยความจำด้วย RLIMIT_AS แทน
+     (และไม่จำกัดจำนวนโปรเซส log ตอนเริ่มจะเตือน) เสริมด้วย rlimit (CPU, ขนาดไฟล์, fd, ไม่มี core dump) และตัด output ที่ 1 MB
+3. **จำกัดการใช้ทรัพยากร:** จำกัดคนตรวจพร้อมกัน, 1 งานต่อผู้ใช้, คิวสูงสุด 40, rate limit 30 คำขอ `/api`/วินาที/IP
 
 ฝั่งเว็บ: รหัสผ่านเก็บแบบ bcrypt, session secret สุ่ม, session เก็บเป็นไฟล์ (`httpOnly`, `sameSite=lax`), ล็อกอินผิดเกิน 10 ครั้งต่อ 15 นาที/IP จะถูกล็อก,
 ตรวจ `Origin` กัน CSRF, สิทธิ์ของผู้ใช้ถูกตรวจใหม่ทุก request, helmet, และผู้ดูแลคนสุดท้ายลบหรือถอนสิทธิ์ไม่ได้
 
 ### ข้อควรระวัง
-- **Windows ไม่มีการตัด network ของโค้ดนักเรียน** (ทำไม่ได้โดยไม่ใช้สิทธิ์ admin) ถ้าต้องการแยกขาด ให้รันบน Linux + firejail/Docker
-- ฝั่ง Linux ของโปรเจกต์นี้ **ยังไม่ได้ทดสอบ** (ผู้พัฒนาใช้ Windows) ให้ทดสอบกับโจทย์จริงก่อนใช้งาน
+- **Windows ไม่มีการตัด network ของโค้ดนักเรียน** (ทำไม่ได้โดยไม่ใช้สิทธิ์ admin) ถ้าต้องการแยกขาด ให้รันบน Linux
+- ฝั่ง Linux ทดสอบบน Ubuntu 26.04 แล้วด้วยโค้ดโจมตี: วนไม่จบ, กิน RAM, fork bomb, พิมพ์ไม่หยุด, อ่าน `/etc/passwd`/ไฟล์ของ server, `#include </etc/passwd>`, เขียนไฟล์, ต่อ network ผ่าน `syscall()` ตรงๆ ทั้งหมดถูกกันและไม่เหลือโปรเซสค้าง
 - server พูด HTTP ธรรมดา (cookie ไม่ตั้ง `secure`) ถ้าเปิดสู่อินเทอร์เน็ต ควรวางหลัง reverse proxy ที่ทำ HTTPS
 - ไม่มีการยืนยันอีเมล/ป้องกันการสมัครสแปมนอกจาก rate limit ถ้าเปิดสาธารณะ ควรเพิ่มมาตรการเอง
+
+## รันเป็น service บน Linux
+
+ตัวอย่าง systemd user service (`~/.config/systemd/user/grader-kak.service`) ค่าตั้งใส่ใน `.env` ข้างโค้ด (เช่น `PORT=4013`)
+
+```ini
+[Unit]
+Description=Grader-kak
+After=network.target
+
+[Service]
+WorkingDirectory=%h/program/grader-kak
+EnvironmentFile=%h/program/grader-kak/.env
+ExecStart=/usr/bin/node %h/program/grader-kak/server.js
+Restart=on-failure
+RestartSec=5
+# ให้ server สร้าง cgroup ย่อยต่อการรันได้ (memory.max / pids.max / cgroup.kill)
+Delegate=memory pids
+NoNewPrivileges=yes
+# เพดานรวมของ grader ทั้งตัว รวมทุกงานที่กำลังรัน
+MemoryMax=8G
+TasksMax=1024
+CPUWeight=50
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now grader-kak
+loginctl enable-linger $USER     # ให้ service รันต่อแม้ไม่ได้ล็อกอิน
+journalctl --user -u grader-kak  # ต้องเห็นบรรทัด "[sandbox] bubblewrap + per-run cgroups"
+```
+
+บน Ubuntu 24.04 ขึ้นไป (AppArmor จำกัด user namespace) `bwrap` ใช้ได้เลยเพราะมี profile ของมันอยู่แล้ว
 
 ## โครงสร้างโปรเจกต์
 
@@ -206,9 +250,10 @@ graders/
   grader_py.js            รัน Python ต่อเทสต์
   limits.js               ขอบเขต/ค่าเริ่มต้นของ time & memory, ตัดข้อความ output
   run_win.js              ตัวเรียก sandbox_runner.exe + เตรียม .sandbox/ (Windows)
+  run_linux.js            sandbox บน Linux: bubblewrap + cgroup ต่อการรัน + rlimit
   sandbox_runner.cs       ต้นฉบับ launcher ของ sandbox (Windows)
   build_runner.ps1        สคริปต์คอมไพล์ sandbox_runner.exe ด้วย csc.exe
-security/policy.js        รายการ API ต้องห้าม + ตัวสแกน + ค่า ulimit/firejail (Linux)
+security/policy.js        รายการ API ต้องห้าม + ตัวสแกน
 utils/storage.js          อ่าน/เขียน JSON แบบมี lock และเขียนไฟล์แบบอะตอมมิก
 public/                   หน้าเว็บ (index.html, app.js)
 problems/                 ไฟล์โจทย์ (PDF) ที่เผยแพร่ แยกตามโปรเจกต์ + README บอกที่มา (ไม่มีเทสต์เคส)
@@ -261,6 +306,7 @@ uploads/pdfs/             ไฟล์ PDF โจทย์ (สร้างเ�
 | อาการ | สาเหตุ / วิธีแก้ |
 |---|---|
 | server ไม่ยอมเริ่ม มีข้อความ `cannot set up the code sandbox` | Windows: ไม่พบ `csc.exe` หรือตั้งสิทธิ์ `.sandbox` ไม่สำเร็จ ดูข้อความต่อท้ายใน log |
+| server ไม่ยอมเริ่ม มีข้อความ `bubblewrap (bwrap) is missing` | Linux: ติดตั้ง `bubblewrap` (`apt install bubblewrap` / `pacman -S bubblewrap`) |
 | `spawn ... ENOENT` ตอนตรวจ | path ของโปรเจกต์ยาวเกิน 260 ตัวอักษรบน Windows ให้ย้ายโปรเจกต์ไปไว้ path ที่สั้นกว่านี้ หรือเช็กว่า `g++`/`python` อยู่ใน `PATH` ของ process ที่รัน server |
 | คอมไพล์ไม่ผ่านทุกข้อ | `g++` ไม่อยู่ใน `PATH` ของ process ที่รัน server (ลอง `g++ --version` ในหน้าต่างเดียวกัน) |
 | `EADDRINUSE` | port ถูกใช้แล้ว เปลี่ยน `PORT` หรือปิดโปรเซสเดิม |

@@ -1,14 +1,11 @@
 // graders/grader_cpp.js
 import { promises as fs } from 'fs';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import path from 'path';
-import { cppForbiddenDefines, scanCppCode, describeHits, runtimeShellPrefix, maybeSandbox } from '../security/policy.js';
+import { cppForbiddenDefines, scanCppCode, describeHits } from '../security/policy.js';
 
 import { isWin, runSandboxed, resolveExe } from './run_win.js';
+import { runBoxed } from './run_linux.js';
 import { normalizeLimits, clip, cut, CLIP_CHARS, RUN_OUTPUT_BYTES } from './limits.js';
-
-const pexec = promisify(exec);
 
 export async function gradeCPP(sourceCode, tests, workdir, limits = {}) {
   const { timeLimitMs, memLimitMB } = normalizeLimits(limits);
@@ -41,9 +38,9 @@ export async function gradeCPP(sourceCode, tests, workdir, limits = {}) {
       await runSandboxed(resolveExe('g++'), [...compileFlags, '-o', bin, src],
         { cwd: workdir, timeoutMs: 20000, memMB: 2048, maxProcs: 8, maxBuffer: 5 * 1024 * 1024 });
     } else {
-      await pexec(`g++ ${compileFlags.join(' ')} -o "${bin}" "${src}"`, {
-        timeout: 20000, cwd: workdir, maxBuffer: 5 * 1024 * 1024
-      });
+      // the compiler reads untrusted source (#include, .incbin, ...), so it runs sandboxed too
+      await runBoxed('g++', [...compileFlags, '-o', '/box/a.out', '/box/main.cpp'],
+        { workdir, writable: true, timeoutMs: 20000, cpuSec: 30, memMB: 2048, maxProcs: 16, maxBuffer: 5 * 1024 * 1024 });
     }
   } catch (e) {
     return {
@@ -60,19 +57,13 @@ export async function gradeCPP(sourceCode, tests, workdir, limits = {}) {
     if (limits?.signal?.aborted) break;   // the request ran out of time: stop launching more tests
     const { input, expected } = tests[i];
     try {
-      const inFile = path.join(workdir, `in_${i}.txt`);
-      await fs.writeFile(inFile, input ?? '', 'utf-8');
-
       const r0 = Date.now();
       let stdout;
       if (isWin) {
         ({ stdout } = await runSandboxed(bin, [], { input, cwd: workdir, timeoutMs: timeLimitMs, memMB: memLimitMB, maxProcs: 1, maxBuffer: RUN_OUTPUT_BYTES }));
       } else {
-        const shell = runtimeShellPrefix(memLimitMB, timeLimitMs)
-          + maybeSandbox(`timeout ${(timeLimitMs / 1000).toFixed(3)}s "${bin}" < "${inFile}"`);
-        ({ stdout } = await pexec(`bash -lc '${shell}'`, {
-          timeout: timeLimitMs + 3000, cwd: workdir, maxBuffer: RUN_OUTPUT_BYTES
-        }));
+        ({ stdout } = await runBoxed('/box/a.out', [],
+          { input, workdir, timeoutMs: timeLimitMs, memMB: memLimitMB, maxProcs: 16, maxBuffer: RUN_OUTPUT_BYTES, signal: limits?.signal }));
       }
 
       const runMs = Date.now() - r0;

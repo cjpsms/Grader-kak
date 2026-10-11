@@ -19,6 +19,7 @@ import { readJSON, writeJSON, updateJSON, ensureFile, NO_WRITE, withLock, rename
 import { gradeCPP } from './graders/grader_cpp.js';
 import { gradePY } from './graders/grader_py.js';
 import { isWin, initSandbox, SANDBOX_DIR } from './graders/run_win.js';
+import { initLinuxSandbox } from './graders/run_linux.js';
 import { normalizeLimits, parseLimit, TIME_LIMIT, MEM_LIMIT } from './graders/limits.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -40,9 +41,10 @@ await ensureFile(PROJECTS, '[]');
 await ensureFile(PROBLEMS, '[]');
 await ensureFile(SUBMISSIONS, '[]');
 
-/* Windows: set up the sandbox that student code runs in. Fail closed — never grade without it. */
+/* Set up the sandbox that student code runs in (Windows: sandbox_runner.exe, Linux: bubblewrap). Fail closed — never grade without it. */
 try {
   initSandbox();
+  initLinuxSandbox();
 } catch (e) {
   console.error('FATAL: cannot set up the code sandbox, refusing to start:', e.stderr?.toString() || e.message);
   process.exit(1);
@@ -135,15 +137,23 @@ for (const m of ['get', 'post']) {
     : orig(args[0], ...args.slice(1).flat().map(wrapHandler));
 }
 
+/* Behind a reverse proxy / tunnel (nginx, cloudflared) every request arrives from 127.0.0.1, so a whole class would share one
+   rate-limit bucket. TRUST_PROXY (e.g. "loopback") makes req.ip the real client address from X-Forwarded-For. */
+if (process.env.TRUST_PROXY) {
+  const tp = process.env.TRUST_PROXY;
+  app.set('trust proxy', /^\d+$/.test(tp) ? Number(tp) : tp === 'true' ? true : tp);
+}
+
 /* Security + DoS */
 app.use(helmet({ contentSecurityPolicy: false }));
+// API calls only (static files/PDFs are not limited). A classroom behind one NAT shares an IP, so this is per IP, not per student.
 const limiter = rateLimit({
   windowMs: 1000,
-  max: 5,
+  max: Number(process.env.API_RATE_PER_SEC) || 30,
   standardHeaders: true,
   legacyHeaders: false
 });
-app.use(limiter);
+app.use('/api', limiter);
 
 /* Body & Session (เพิ่มลิมิตเป็น 5MB) */
 app.use(bodyParser.json({ limit: '5mb' }));
@@ -225,7 +235,7 @@ function startSession(req, user) {
 /* Queue (จำกัดงานพร้อมกันเพื่อความลื่น) */
 const jobQ = [];
 let running = 0;
-const MAX_CONCURRENCY = Math.max(1, Math.min(2, (os.cpus()?.length) || 1));
+const MAX_CONCURRENCY = Number(process.env.GRADER_CONCURRENCY) || Math.max(1, Math.min(4, Math.floor(((os.cpus()?.length) || 1) / 2)));
 function enqueue(fn) {
   return new Promise((resolve, reject) => {
     jobQ.push({ fn, resolve, reject });
@@ -610,7 +620,7 @@ async function runInScratch(fn) {
   // Windows: the sandbox root (Low-integrity, Everyone-modify for children only); elsewhere RAM-backed tmp if available
   const runBase = isWin ? SANDBOX_DIR : (fssync.existsSync('/dev/shm') ? '/dev/shm' : os.tmpdir());
   const runDir = path.join(runBase, `grader-${uuid()}`);
-  await fs.mkdir(runDir, { recursive: true });
+  await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
   try {
     return await fn(runDir);
   } finally {
@@ -646,7 +656,7 @@ function runJob(runFn, budgetMs) {
 
 // One grading job per user at a time (a 1000-test problem takes ~45 s; stacking submissions would starve everyone else),
 // and refuse new work when the queue is already deep.
-const MAX_QUEUE = 40;
+const MAX_QUEUE = Number(process.env.GRADER_MAX_QUEUE) || 40;
 const busyUsers = new Set();
 function oneJobPerUser(req, res, next) {
   const uid = req.user.id;

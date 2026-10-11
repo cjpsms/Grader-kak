@@ -100,15 +100,4 @@ export function describeHits(hits = []) {
 }
 
 // ------------------------------------------------------------------
-// Sandbox settings
-export function runtimeShellPrefix(memMB = 256, timeMs = 2000) {
-  // จำกัด CPU, RAM, fd, file size, no core dump (CPU seconds are a backstop above the `timeout` wall-clock limit)
-  return `ulimit -t ${Math.ceil(timeMs / 1000) + 1}; ulimit -v ${Math.round(memMB) * 1024}; ulimit -n 64; ulimit -f 10240; ulimit -c 0; `;
-}
-
-export function maybeSandbox(cmd) {
-  // ใช้ firejail ถ้ามี (ตัด network + private FS + drop caps)
-  return `if command -v firejail >/dev/null 2>&1; then \
-firejail --quiet --net=none --private --nosound --caps.drop=all -- ${cmd}; \
-else ${cmd}; fi`;
-}
+// The runtime sandbox (the real boundary) lives in graders/run_linux.js (bubblewrap + cgroups) and graders/run_win.js.
