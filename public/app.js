@@ -462,7 +462,7 @@ const cleanLog = log => String(log || '')
 function renderResult(sub) {
   const st = sub.status;
   const pct = sub.total ? Math.round(sub.pass / sub.total * 100) : 0;
-  const sumRun = (sub.results || []).reduce((a, b) => a + (b.runMs || 0), 0);
+  const sumRun = sub.runMs ?? 0;
   const cases = (sub.results || []).map(t =>
     `<span class="case ${t.pass ? 'pass' : ''}" title="เทสต์ #${t.idx}: ${t.pass ? 'ผ่าน' : 'ไม่ผ่าน'}">${t.idx}</span>`).join('');
   const log = st === 'gray' && sub.compileLog
@@ -571,7 +571,7 @@ function renderMySubs() {
     el.style.cssText = 'display:block;padding:.7rem .9rem';
     const cases = (Array.isArray(s.results) ? s.results : []).map(t =>
       `<span class="case sm ${t.pass ? 'pass' : ''}" title="เทสต์ #${t.idx}: ${t.pass ? 'ผ่าน' : 'ไม่ผ่าน'}"></span>`).join('');
-    const sumRun = (s.results || []).reduce((a, b) => a + (b.runMs || 0), 0);
+    const sumRun = s.runMs ?? 0;
     el.innerHTML = `
       <div class="flex flex-wrap items-center gap-2">
         <span class="font-semibold">${esc(problemTitles.get(s.problemId) || 'โจทย์ที่ถูกลบ')}</span>
@@ -586,9 +586,16 @@ function renderMySubs() {
       <div class="muted text-xs mt-1">compile ${s.compileMs != null ? s.compileMs + 'ms' : '-'} · run รวม ${sumRun}ms${s.status === 'gray' ? ' · compile error' : ''}</div>
       <details class="mt-1">
         <summary class="link text-sm">ดูโค้ดที่ส่ง</summary>
-        <pre class="log mono"></pre>
+        <pre class="log mono">กำลังโหลด...</pre>
       </details>`;
-    el.querySelector('pre').textContent = s.code || '';
+    // the code is not in the list (keeps it small); fetch it the first time the box is opened
+    el.querySelector('details').addEventListener('toggle', async ev => {
+      if (!ev.target.open || ev.target.dataset.loaded) return;
+      ev.target.dataset.loaded = '1';
+      const r = await api(`/api/submissions/${encodeURIComponent(s.id)}`);
+      el.querySelector('pre').textContent = r.ok ? (r.detail.code || '') : 'โหลดไม่สำเร็จ';
+      if (!r.ok) delete ev.target.dataset.loaded;
+    });
     subsWrap.appendChild(el);
   });
 }
@@ -601,13 +608,30 @@ adminTabs.addEventListener('click', e => {
   $$('#adminPage [data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== b.dataset.t));
 });
 
-function adminSubHtml(sub) {
-  const tests = (sub.results || []).map(r => `
+// details (compile log, per-test input/expected/got, code) are fetched when the box is opened; passed tests store no I/O
+function adminSubDetailHtml(d) {
+  const tests = (d.results || []).map(r => `
     <div class="mt-2 pt-2" style="border-top:1px solid var(--border)">
       <span class="case ${r.pass ? 'pass' : ''}" style="display:inline-grid">${r.idx}</span>
       <span class="muted text-xs ml-1">run ${r.runMs ?? 0}ms${r.timedOut ? ' · timeout' : ''}</span>
-      <div class="mono text-xs mt-1" style="word-break:break-all">input: ${esc(r.input)}<br>expected: ${esc(r.expected)}<br>got: ${esc(r.got || '')}${r.error ? `<br>error: ${esc(r.error)}` : ''}</div>
+      ${r.pass ? '' : `<div class="mono text-xs mt-1" style="word-break:break-all">input: ${esc(r.input)}<br>expected: ${esc(r.expected)}<br>got: ${esc(r.got || '')}${r.error ? `<br>error: ${esc(r.error)}` : ''}</div>`}
     </div>`).join('');
+  return `
+    ${d.compileLog ? `<pre class="log">${esc(d.compileLog)}</pre>` : ''}
+    ${tests}
+    <details class="mt-2"><summary class="link text-sm">ดูโค้ดที่ส่ง</summary><pre class="log mono">${esc(d.code || '')}</pre></details>`;
+}
+allSubs.addEventListener('toggle', async ev => {   // 'toggle' does not bubble, so listen in the capture phase
+  const box = ev.target;
+  if (!box.matches?.('details[data-sub]') || !box.open || box.dataset.loaded) return;
+  box.dataset.loaded = '1';
+  const r = await api(`/api/submissions/${encodeURIComponent(box.dataset.sub)}`);
+  if (!r.ok) { delete box.dataset.loaded; box.querySelector('.subDetail').textContent = 'โหลดไม่สำเร็จ'; return; }
+  const out = box.querySelector('.subDetail');
+  out.className = 'subDetail';
+  out.innerHTML = adminSubDetailHtml(r.detail);
+}, true);
+function adminSubHtml(sub) {
   return `
     <div class="box p-3">
       <div class="flex flex-wrap items-center gap-2">
@@ -620,11 +644,9 @@ function adminSubHtml(sub) {
         <span class="flex-1"></span>
         <span class="muted text-xs">${esc(fmtDate(sub.createdAt))}</span>
       </div>
-      <details class="mt-2">
+      <details class="mt-2" data-sub="${esc(sub.id)}">
         <summary class="link text-sm">ดู log / โค้ด</summary>
-        ${sub.compileLog ? `<pre class="log">${esc(sub.compileLog)}</pre>` : ''}
-        ${tests}
-        <details class="mt-2"><summary class="link text-sm">ดูโค้ดที่ส่ง</summary><pre class="log mono">${esc(sub.code || '')}</pre></details>
+        <div class="subDetail muted text-sm">กำลังโหลด...</div>
       </details>
     </div>`;
 }

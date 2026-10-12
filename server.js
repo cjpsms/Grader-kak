@@ -65,6 +65,46 @@ await updateJSON(PROBLEMS, async problems => {   // one-time migration from the 
   console.log(`[tests] moved the tests of ${moved} problem(s) to ${TESTS_DIR}`);
 });
 
+/* Submissions: submissions.json holds only small summaries (it is read on every history page and rewritten on every submit,
+   so it must stay small); code, compile log and per-test details live in data/subs/<id>.json and are loaded on demand.
+   Passed tests keep only idx/runMs — their input/expected are in the tests file and their output equals expected. */
+const SUBS_DIR = path.join(DATA, 'subs');
+await fs.mkdir(SUBS_DIR, { recursive: true });
+const subFile = id => path.join(SUBS_DIR, String(id).replace(/[^A-Za-z0-9-]/g, '_') + '.json');
+const caseChar = r => r.pass ? 'P' : r.timedOut ? 'T' : 'F';
+function splitSubmission(sub) {
+  const results = sub.results || [];
+  const summary = {
+    id: sub.id, userId: sub.userId, username: sub.username, problemId: sub.problemId, language: sub.language,
+    pass: sub.pass, total: sub.total, status: sub.status, testsRev: sub.testsRev, compileMs: sub.compileMs,
+    runMs: sub.runMs ?? results.reduce((a, r) => a + (r.runMs || 0), 0),
+    cases: sub.cases ?? results.map(caseChar).join(''),
+    createdAt: sub.createdAt
+  };
+  const detail = {
+    id: sub.id, userId: sub.userId, code: sub.code || '', compileLog: sub.compileLog || '',
+    results: results.map(r => r.pass ? { idx: r.idx, pass: true, runMs: r.runMs } : r)
+  };
+  return { summary, detail };
+}
+async function loadSubDetail(id) {
+  try { return JSON.parse(await fs.readFile(subFile(id), 'utf-8')); }
+  catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+}
+const removeSubDetails = ids => Promise.all([...ids].map(id => fs.unlink(subFile(id)).catch(() => {})));
+await updateJSON(SUBMISSIONS, async subs => {   // one-time migration from the old layout (everything inside submissions.json)
+  let moved = 0;
+  for (let i = 0; i < subs.length; i++) {
+    if (subs[i].code === undefined && subs[i].results === undefined) continue;
+    const { summary, detail } = splitSubmission(subs[i]);
+    await writeJSON(subFile(summary.id), detail);
+    subs[i] = summary;
+    moved++;
+  }
+  if (!moved) return NO_WRITE;
+  console.log(`[subs] moved the details of ${moved} submission(s) to ${SUBS_DIR}`);
+});
+
 /* Set up the sandbox that student code runs in (Windows: sandbox_runner.exe, Linux: bubblewrap). Fail closed — never grade without it. */
 try {
   initSandbox();
@@ -504,14 +544,14 @@ app.post('/api/admin/problems/delete', requireAuth, requireAdmin, async (req, re
   await removeTests(pb.id);
 
   // remove submissions of this problem
-  let removedSubs = 0;
+  let removed = [];
   await updateJSON(SUBMISSIONS, subs => {
-    const kept = subs.filter(s => s.problemId !== id);
-    removedSubs = subs.length - kept.length;
-    return kept;
+    removed = subs.filter(s => s.problemId === id).map(s => s.id);
+    return subs.filter(s => s.problemId !== id);
   });
+  await removeSubDetails(removed);
 
-  res.json({ ok:true, removedSubs });
+  res.json({ ok:true, removedSubs: removed.length });
 });
 
 /* Admin: delete ONE project (also remove its problems, PDFs, and related submissions) */
@@ -536,22 +576,23 @@ app.post('/api/admin/projects/delete', requireAuth, requireAdmin, async (req, re
   for (const pb of toRemove) { await removePdf(pb); await removeTests(pb.id); }
 
   // remove submissions of those problems
-  let removedSubs = 0;
+  let removed = [];
   const pbIds = new Set(toRemove.map(pb => pb.id));
   await updateJSON(SUBMISSIONS, subs => {
-    const kept = subs.filter(s => !pbIds.has(s.problemId));
-    removedSubs = subs.length - kept.length;
-    return kept;
+    removed = subs.filter(s => pbIds.has(s.problemId)).map(s => s.id);
+    return subs.filter(s => !pbIds.has(s.problemId));
   });
+  await removeSubDetails(removed);
 
-  res.json({ ok:true, removedProblems: toRemove.length, removedSubs });
+  res.json({ ok:true, removedProblems: toRemove.length, removedSubs: removed.length });
 });
 
 /* Never send test inputs / expected outputs to students (admin routes return the full data) */
 const publicProblem = ({ tests, ...rest }) => ({ ...rest, ...normalizeLimits(rest), testCount: rest.testCount || 0 });
+// takes a summary (see splitSubmission) and expands its `cases` string into the per-test list the page draws
 const publicSubmission = sub => ({
   ...sub,
-  results: (sub.results || []).map(({ idx, pass, runMs, timedOut }) => ({ idx, pass, runMs, timedOut }))
+  results: [...(sub.cases || '')].map((c, i) => ({ idx: i + 1, pass: c === 'P', timedOut: c === 'T' }))
 });
 
 /* Problems */
@@ -880,13 +921,15 @@ app.post('/api/submit', requireAuth, oneJobPerUser, async (req, res) => {
     pass, total, status, testsRev,
     createdAt: Date.now()
   };
+  const { summary, detail } = splitSubmission(sub);
+  await writeJSON(subFile(summary.id), detail);   // details first: a summary in the list must always have its file
   // appended under the file lock: simultaneous submissions can no longer overwrite each other
-  await updateJSON(SUBMISSIONS, submissions => { submissions.push(sub); });
+  await updateJSON(SUBMISSIONS, submissions => { submissions.push(summary); });
 
-  reply({ ok: true, submission: publicSubmission(sub) });
+  reply({ ok: true, submission: { ...publicSubmission(summary), compileLog: sub.compileLog } });
 });
 
-/* Submissions (mine/admin) */
+/* Submissions (mine/admin): lists are summaries only; code / compile log / per-test details come from /api/submissions/:id */
 app.get('/api/my/submissions', requireAuth, async (req, res) => {
   const submissions = await readJSON(SUBMISSIONS, []);
   const mine = submissions.filter(s => s.userId === req.user.id)
@@ -895,7 +938,13 @@ app.get('/api/my/submissions', requireAuth, async (req, res) => {
 });
 app.get('/api/admin/submissions', requireAuth, requireAdmin, async (req, res) => {
   const submissions = await readJSON(SUBMISSIONS, []);
-  res.json({ ok: true, submissions: submissions.sort((a, b) => b.createdAt - a.createdAt) });
+  res.json({ ok: true, submissions: submissions.sort((a, b) => b.createdAt - a.createdAt).map(publicSubmission) });
+});
+app.get('/api/submissions/:id', requireAuth, async (req, res) => {
+  const detail = await loadSubDetail(req.params.id);
+  if (!detail || (detail.userId !== req.user.id && !req.user.isAdmin)) return res.json({ ok: false, error: 'not_found' });
+  if (req.user.isAdmin) return res.json({ ok: true, detail });
+  res.json({ ok: true, detail: { id: detail.id, code: detail.code, compileLog: detail.compileLog } });   // never the hidden tests
 });
 
 /* Web page */

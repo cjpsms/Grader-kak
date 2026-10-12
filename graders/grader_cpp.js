@@ -36,11 +36,11 @@ export async function gradeCPP(sourceCode, tests, workdir, limits = {}) {
     if (isWin) {
       // the compiler reads untrusted source (#include, .incbin, ...), so it runs sandboxed too
       await runSandboxed(resolveExe('g++'), [...compileFlags, '-o', bin, src],
-        { cwd: workdir, timeoutMs: 20000, memMB: 2048, maxProcs: 8, maxBuffer: 5 * 1024 * 1024 });
+        { cwd: workdir, timeoutMs: 20000, memMB: 1024, maxProcs: 8, maxBuffer: 5 * 1024 * 1024 });
     } else {
       // the compiler reads untrusted source (#include, .incbin, ...), so it runs sandboxed too
       await runBoxed('g++', [...compileFlags, '-o', '/box/a.out', '/box/main.cpp'],
-        { workdir, writable: true, timeoutMs: 20000, cpuSec: 30, memMB: 2048, maxProcs: 16, maxBuffer: 5 * 1024 * 1024 });
+        { workdir, writable: true, timeoutMs: 20000, cpuSec: 30, memMB: 1024, maxProcs: 16, maxBuffer: 5 * 1024 * 1024 });
     }
   } catch (e) {
     return {
